@@ -46,6 +46,12 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private
 
+RUN useradd -m -s /bin/bash paperclip \
+  && mkdir -p /paperclip \
+  && chown -R paperclip:paperclip /paperclip /app
+
+USER paperclip
+
 VOLUME ["/paperclip"]
 EXPOSE 3100
 
