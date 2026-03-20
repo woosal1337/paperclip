@@ -349,6 +349,31 @@ async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+export function isMissingStorageObjectError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; status?: unknown; name?: unknown; message?: unknown };
+  return candidate.code === "ENOENT"
+    || candidate.status === 404
+    || candidate.name === "NoSuchKey"
+    || candidate.name === "NotFound"
+    || candidate.message === "Object not found.";
+}
+
+export async function readSourceAttachmentBody(
+  sourceStorage: Pick<ConfiguredStorage, "getObject">,
+  companyId: string,
+  objectKey: string,
+): Promise<Buffer | null> {
+  try {
+    return await sourceStorage.getObject(companyId, objectKey);
+  } catch (error) {
+    if (isMissingStorageObjectError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export function resolveWorktreeMakeTargetPath(name: string): string {
   return path.resolve(os.homedir(), resolveWorktreeMakeName(name));
 }
@@ -2158,6 +2183,7 @@ async function applyMergePlan(input: {
       ).map((row) => row.id),
     );
     let insertedAttachments = 0;
+    let skippedMissingAttachmentObjects = 0;
     for (const attachment of attachmentCandidates) {
       if (existingAttachmentIds.has(attachment.source.id)) continue;
       const parentExists = await tx
@@ -2167,7 +2193,15 @@ async function applyMergePlan(input: {
         .then((rows) => rows[0] ?? null);
       if (!parentExists) continue;
 
-      const body = await input.sourceStorage.getObject(companyId, attachment.source.objectKey);
+      const body = await readSourceAttachmentBody(
+        input.sourceStorage,
+        companyId,
+        attachment.source.objectKey,
+      );
+      if (!body) {
+        skippedMissingAttachmentObjects += 1;
+        continue;
+      }
       await input.targetStorage.putObject(
         companyId,
         attachment.source.objectKey,
@@ -2209,6 +2243,7 @@ async function applyMergePlan(input: {
       mergedDocuments,
       insertedDocumentRevisions,
       insertedAttachments,
+      skippedMissingAttachmentObjects,
       insertedIssueIdentifiers,
     };
   });
@@ -2299,6 +2334,11 @@ export async function worktreeMergeHistoryCommand(sourceArg: string | undefined,
       company,
       plan: collected.plan,
     });
+    if (applied.skippedMissingAttachmentObjects > 0) {
+      p.log.warn(
+        `Skipped ${applied.skippedMissingAttachmentObjects} attachments whose source files were missing from storage.`,
+      );
+    }
     p.outro(
       pc.green(
         `Imported ${applied.insertedIssues} issues, ${applied.insertedComments} comments, ${applied.insertedDocuments} documents (${applied.insertedDocumentRevisions} revisions, ${applied.mergedDocuments} merged), and ${applied.insertedAttachments} attachments into ${company.issuePrefix}.`,
